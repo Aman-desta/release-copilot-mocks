@@ -171,9 +171,11 @@ def get_issue(key: str, request: Request, fields: str | None = None, world: dict
 
 
 @router.get("/issue/{key}/comment")
-def get_comments(key: str, world: dict = Depends(get_world)) -> dict[str, Any]:
+def get_comments(
+    key: str, startAt: int = Query(0, ge=0), maxResults: int = Query(50, ge=1, le=100), world: dict = Depends(get_world)
+) -> dict[str, Any]:
     comments = _issue(world, key)["fields"]["comment"]["comments"]
-    return {"startAt": 0, "maxResults": len(comments), "total": len(comments), "comments": comments}
+    return {"startAt": startAt, "maxResults": maxResults, "total": len(comments), "comments": comments[startAt : startAt + maxResults]}
 
 
 @router.post("/issue/{key}/comment", status_code=201)

@@ -124,24 +124,26 @@ def list_commits(
     return [_commit_view(c, request, owner, repo, False) for c in _paginate(history, request, response, per_page, page)]
 
 
-@router.get("/repos/{owner}/{repo}/commits/{ref}")
-def get_commit(owner: str, repo: str, ref: str, request: Request, world: dict = Depends(get_world)) -> dict[str, Any]:
-    gh = _repo(world, owner, repo)
-    return _commit_view(gh["commits"][_resolve(gh, ref)], request, owner, repo, True)
-
-
-@router.get("/repos/{owner}/{repo}/commits/{ref}/pulls")
+# Refs may contain slashes (release/2.4.0), so they use the path converter; the more specific routes come first.
+@router.get("/repos/{owner}/{repo}/commits/{ref:path}/pulls")
 def pulls_for_commit(owner: str, repo: str, ref: str, world: dict = Depends(get_world)) -> list[dict[str, Any]]:
     gh = _repo(world, owner, repo)
     sha = gh["commits"][_resolve(gh, ref)]["sha"]
     return [_pull_view(p, owner, repo) for p in gh["pulls"] if p["merge_commit_sha"] == sha]
 
 
-@router.get("/repos/{owner}/{repo}/commits/{ref}/check-runs")
+@router.get("/repos/{owner}/{repo}/commits/{ref:path}/check-runs")
 def check_runs(owner: str, repo: str, ref: str, world: dict = Depends(get_world)) -> dict[str, Any]:
     gh = _repo(world, owner, repo)
-    runs = gh["check_runs"].get(gh["commits"][_resolve(gh, ref)]["sha"], [])
+    sha = gh["commits"][_resolve(gh, ref)]["sha"]
+    runs = [{**run, "head_sha": sha} for run in gh["check_runs"].get(sha, [])]
     return {"total_count": len(runs), "check_runs": runs}
+
+
+@router.get("/repos/{owner}/{repo}/commits/{ref:path}")
+def get_commit(owner: str, repo: str, ref: str, request: Request, world: dict = Depends(get_world)) -> dict[str, Any]:
+    gh = _repo(world, owner, repo)
+    return _commit_view(gh["commits"][_resolve(gh, ref)], request, owner, repo, True)
 
 
 @router.get("/repos/{owner}/{repo}/pulls")
