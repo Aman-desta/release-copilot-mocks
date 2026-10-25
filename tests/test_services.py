@@ -187,21 +187,42 @@ def _latest(client, azure, metric, slot=None, hdrs=None):
 def test_azure_swap_is_async_and_moves_release(client, azure):
     resp = client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers=azure)
     assert resp.status_code == 202
-    op = client.get(resp.headers["azure-asyncoperation"].replace("http://testserver", ""), headers=azure)
-    assert op.json()["status"] == "Succeeded"
+    op_url = resp.headers["azure-asyncoperation"].replace("http://testserver", "")
+    assert client.get(SITE_URL, params=API_VERSION, headers=azure).json()["tags"]["release"] == "2.3.1"  # not yet
+    assert [client.get(op_url, headers=azure).json()["status"] for _ in range(3)] == ["InProgress", "InProgress", "Succeeded"]
     assert client.get(SITE_URL, params=API_VERSION, headers=azure).json()["tags"]["release"] == "2.4.0-rc.1"
     assert _latest(client, azure, "Http5xx") < 5  # clean scenario stays healthy
+
+
+def _swap_and_wait(client, azure, headers=None):
+    resp = client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers={**azure, **(headers or {})})
+    op_url = resp.headers["azure-asyncoperation"].replace("http://testserver", "")
+    while (status := client.get(op_url, headers={**azure, **(headers or {})}).json()["status"]) == "InProgress":
+        pass
+    return status
+
+
+def test_swap_failure_and_concurrent_swap_conflict(client, azure):
+    first = client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers=azure)
+    second = client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers=azure)
+    assert first.status_code == 202 and second.status_code == 409  # one swap at a time
+    op_url = first.headers["azure-asyncoperation"].replace("http://testserver", "")
+    while client.get(op_url, headers=azure).json()["status"] == "InProgress":
+        pass
+    client.app.state.mock.world()["azure"]["swap_fails"] = True
+    assert _swap_and_wait(client, azure) == "Failed"
+    assert client.get(SITE_URL, params=API_VERSION, headers=azure).json()["tags"]["release"] == "2.4.0-rc.1"  # unchanged by the failure
 
 
 def test_failed_deploy_degrades_only_after_swap_in_production(client, azure):
     h = scenario("failed_deploy")
     assert _latest(client, azure, "Http5xx", slot="staging", hdrs=h) == 0
     assert _latest(client, azure, "Http5xx", hdrs=h) < 5
-    client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers={**azure, **h})
+    assert _swap_and_wait(client, azure, h) == "Succeeded"
     assert _latest(client, azure, "Http5xx", hdrs=h) > 100
     assert _latest(client, azure, "HttpResponseTime", hdrs=h) > 1.5
     # Rollback = swap back.
-    client.post(f"{SITE_URL}/slots/staging/slotsswap", params=API_VERSION, json={"targetSlot": "production"}, headers={**azure, **h})
+    assert _swap_and_wait(client, azure, h) == "Succeeded"
     assert _latest(client, azure, "Http5xx", hdrs=h) < 5
 
 

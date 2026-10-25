@@ -420,6 +420,10 @@ def base_azure() -> dict[str, Any]:
         # Which release, if any, misbehaves under production load (see the ``failed_deploy`` scenario).
         "bad_release": None,
         "swaps": [],
+        # Slot swaps are long-running operations: InProgress for this many polls, then Succeeded (or Failed).
+        "operations": {},
+        "swap_polls": 2,
+        "swap_fails": False,
     }
 
 

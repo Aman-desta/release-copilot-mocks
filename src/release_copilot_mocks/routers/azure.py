@@ -46,7 +46,6 @@ METRICS = {
     "Http5xx": ("Http Server Errors", "Count", "total"),
     "HttpResponseTime": ("Response Time", "Seconds", "average"),
 }
-OPERATIONS: dict[str, str] = {}
 
 
 @login.post("/{tenant}/oauth2/v2.0/token")
@@ -110,20 +109,31 @@ def slot_deployments(sub: str, rg: str, site: str, slot: str, world: dict = Depe
     return {"value": az["deployments"][slot]}
 
 
-def _swap(az: dict[str, Any], source: str, target: str, response: Response, request: Request) -> None:
-    if {source, target} != {"production", "staging"}:
-        raise HTTPException(400, {"error": {"code": "BadRequest", "message": "Swap must be between 'staging' and 'production'."}})
+def _apply_swap(az: dict[str, Any]) -> None:
     prod, staging = az["site"]["tags"], az["slots"]["staging"]["tags"]
     before = {"production": prod["release"], "staging": staging["release"]}
     prod["release"], staging["release"] = staging["release"], prod["release"]
     az["deployments"]["production"], az["deployments"]["staging"] = az["deployments"]["staging"], az["deployments"]["production"]
     az["swaps"].append({"at": datetime.now(timezone.utc).isoformat(), "before": before, "after": {"production": prod["release"], "staging": staging["release"]}})
+
+
+def _swap(az: dict[str, Any], source: str, target: str, response: Response, request: Request) -> None:
+    """Start a swap as a long-running operation, the way ARM does: 202 + Azure-AsyncOperation to poll.
+
+    The operation reports InProgress (with Retry-After) for ``swap_polls`` polls, then completes: the slots are
+    swapped only at that point. With ``swap_fails`` set, it ends as Failed and nothing changes.
+    """
+    if {source, target} != {"production", "staging"}:
+        raise HTTPException(400, {"error": {"code": "BadRequest", "message": "Swap must be between 'staging' and 'production'."}})
+    if any(op["status"] == "InProgress" for op in az["operations"].values()):
+        raise HTTPException(409, {"error": {"code": "Conflict", "message": "Another slot swap operation is in progress."}})
     op = str(uuid.uuid4())
-    OPERATIONS[op] = "Succeeded"
+    az["operations"][op] = {"status": "InProgress", "remaining": az["swap_polls"]}
     response.status_code = 202
     response.headers["Azure-AsyncOperation"] = (
         f"{request.base_url}azure/management/subscriptions/{SUBSCRIPTION_ID}/providers/Microsoft.Web/locations/eastus2/operationResults/{op}?api-version=2023-12-01"
     )
+    response.headers["Retry-After"] = "1"
 
 
 @arm.post(SITE_PATH + "/slots/{slot}/slotsswap")
@@ -145,10 +155,22 @@ def swap_from_production(
 
 
 @arm.get("/subscriptions/{sub}/providers/Microsoft.Web/locations/{loc}/operationResults/{op}")
-def operation_result(sub: str, loc: str, op: str) -> dict[str, Any]:
-    if op not in OPERATIONS:
+def operation_result(sub: str, loc: str, op: str, response: Response, world: dict = Depends(get_world)) -> dict[str, Any]:
+    az = world["azure"]
+    operation = az["operations"].get(op)
+    if operation is None:
         raise HTTPException(404, {"error": {"code": "NotFound", "message": "Operation not found."}})
-    return {"id": op, "status": OPERATIONS[op]}
+    if operation["status"] == "InProgress":
+        if operation["remaining"] > 0:
+            operation["remaining"] -= 1
+            response.headers["Retry-After"] = "1"
+            return {"id": op, "status": "InProgress"}
+        if az["swap_fails"]:
+            operation.update(status="Failed", error={"code": "SwapFailed", "message": "Warm-up of slot 'staging' failed: health check /health returned 503."})
+        else:
+            _apply_swap(az)
+            operation["status"] = "Succeeded"
+    return {"id": op, "status": operation["status"], **({"error": operation["error"]} if "error" in operation else {})}
 
 
 def _minutes(duration: str, default: int) -> int:
