@@ -104,7 +104,9 @@ def _matches(rec: dict[str, Any], cond: str) -> bool:
 
 def query(records: list[dict[str, Any]], sysparm_query: str) -> list[dict[str, Any]]:
     out, order = list(records), []
-    for part in filter(None, sysparm_query.split("^")):
+    # A literal "^" inside a value is escaped as "^^", as in the real encoded-query syntax.
+    parts = [p.replace("\x00", "^") for p in sysparm_query.replace("^^", "\x00").split("^")]
+    for part in filter(None, parts):
         if part.startswith("ORDERBYDESC"):
             order.append((part[11:], True))
         elif part.startswith("ORDERBY"):

@@ -239,3 +239,9 @@ def test_notifications_are_recorded(client):
     assert client.post("/notify/slack/payments", json={}).status_code == 400
     sent = client.get("/_admin/notifications").json()
     assert sent[0]["channel"] == "release-approvals" and sent[0]["scenario"] == "clean"
+
+
+def test_servicenow_escaped_caret_is_a_literal(client):
+    created = client.post("/servicenow/api/now/table/change_request", json={"short_description": "a^ORb"}, headers=SNOW).json()["result"]
+    hit = client.get("/servicenow/api/now/table/change_request", params={"sysparm_query": "short_description=a^^ORb"}, headers=SNOW).json()["result"]
+    assert [r["sys_id"] for r in hit] == [created["sys_id"]]
